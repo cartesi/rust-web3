@@ -173,6 +173,11 @@ impl<T: Transport> Eth<T> {
         CallFuture::new(self.transport.execute("eth_getCompilers", vec![]))
     }
 
+    /// Get chain id
+    pub fn chain_id(&self) -> CallFuture<U256, T::Out> {
+        CallFuture::new(self.transport.execute("eth_chainId", vec![]))
+    }
+
     /// Get storage entry
     pub fn storage(&self, address: Address, idx: U256, block: Option<BlockNumber>) -> CallFuture<H256, T::Out> {
         let address = helpers::serialize(&address);
