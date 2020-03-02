@@ -4,7 +4,9 @@ extern crate websocket;
 
 use std::collections::BTreeMap;
 use std::sync::{atomic, Arc};
+use std::time::{Duration, SystemTime};
 
+use tokio_timer::{Interval, Timer};
 use api::SubscriptionId;
 use futures::{self, Future, Sink, Stream};
 use futures::sync::{mpsc, oneshot};
@@ -50,13 +52,13 @@ pub struct WebSocket {
 impl WebSocket {
     /// Create new WebSocket transport with separate event loop.
     /// NOTE: Dropping event loop handle will stop the transport layer!
-    pub fn new(url: &str) -> Result<(EventLoopHandle, Self)> {
+    pub fn new(url: &str, ping_interval: u64) -> Result<(EventLoopHandle, Self)> {
         let url = url.to_owned();
-        EventLoopHandle::spawn(move |handle| Self::with_event_loop(&url, &handle).map_err(Into::into))
+        EventLoopHandle::spawn(move |handle| Self::with_event_loop(&url, &handle, ping_interval).map_err(Into::into))
     }
 
     /// Create new WebSocket transport within existing Event Loop.
-    pub fn with_event_loop(url: &str, handle: &reactor::Handle) -> Result<Self> {
+    pub fn with_event_loop(url: &str, handle: &reactor::Handle, ping_interval: u64) -> Result<Self> {
         trace!("Connecting to: {:?}", url);
 
         let url: Url = url.parse()?;
@@ -84,6 +86,10 @@ impl WebSocket {
                             OwnedMessage::Ping(d) => write_sender_
                                 .unbounded_send(OwnedMessage::Pong(d))
                                 .map_err(|_| ErrorKind::Transport("Error sending pong message".into()).into()),
+                            OwnedMessage::Pong(d) => {
+                                trace!("Received Pong {:?} at time: {:?}", d, SystemTime::now());
+                                Ok(())
+                            },
                             OwnedMessage::Text(t) => {
                                 if let Ok(notification) = helpers::to_notification_from_slice(t.as_bytes()) {
                                     if let Some(rpc::Params::Map(params)) = notification.params {
@@ -140,7 +146,14 @@ impl WebSocket {
                     });
 
                     let writer = sink.sink_from_err()
-                        .send_all(write_receiver.map_err(|_| websocket::WebSocketError::NoDataAvailable))
+                        .send_all(write_receiver
+                            .map_err(|_| websocket::WebSocketError::NoDataAvailable)
+                            .select(
+                                Timer::default().interval(Duration::from_secs(ping_interval))
+                                    .map(|_| OwnedMessage::Ping("keep_alive".into()))
+                                    .map_err(|_| websocket::WebSocketError::NoDataAvailable)
+                            )
+                        )
                         .map(|_| ());
 
                     reader.join(writer)
